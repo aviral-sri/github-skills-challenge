@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from src.anomaly_detector import AnomalyDetector
-from src.aiops_pipeline import run_pipeline
+from src.aiops_pipeline import load_data, run_pipeline
 from src.event_consumer import EventConsumer
 from src.event_producer import EventProducer
 from src.event_topic import EventTopic
@@ -42,6 +42,46 @@ def test_anomalous_record_is_detected():
     assert event["type"] == "ANOMALY"
 
 
+def test_detector_reports_each_anomaly_reason():
+    detector = AnomalyDetector()
+    record = {
+        "timestamp": "2026-09-20T10:06:00",
+        "service": "payment-service",
+        "response_time_ms": 600,
+        "cpu_percent": 90,
+        "memory_percent": 90,
+        "log_level": "WARNING",
+        "message": "Resource thresholds exceeded"
+    }
+
+    event = detector.detect(record)
+
+    assert event["reasons"] == [
+        "High response time",
+        "High CPU utilization",
+        "High memory utilization",
+        "Error log detected"
+    ]
+
+
+def test_pipeline_loads_data_and_consumes_detected_events(tmp_path):
+    data_path = tmp_path / "service_data.json"
+    data_path.write_text(
+        "[{\"timestamp\": \"2026-09-20T10:00:00\", "
+        "\"service\": \"payment-service\", \"response_time_ms\": 600, "
+        "\"cpu_percent\": 90, \"memory_percent\": 90, "
+        "\"log_level\": \"ERROR\", \"message\": \"Timeout\"}]",
+        encoding="utf-8"
+    )
+
+    assert len(load_data(data_path)) == 1
+    result = run_pipeline(data_path)
+
+    assert result["records_processed"] == 1
+    assert len(result["anomalies_detected"]) == 1
+    assert result["events_consumed"] == []
+
+
 def test_producer_publishes_event():
     topic = EventTopic("anomaly-events")
     producer = EventProducer(topic)
@@ -53,6 +93,14 @@ def test_producer_publishes_event():
 
     assert producer.publish(event)
     assert len(topic.get_messages()) == 1
+
+
+def test_producer_rejects_empty_event():
+    topic = EventTopic("anomaly-events")
+    producer = EventProducer(topic)
+
+    assert producer.publish(None) is False
+    assert topic.get_messages() == []
 
 
 def test_consumer_receives_event():
@@ -70,3 +118,15 @@ def test_consumer_receives_event():
     messages = consumer.consume()
 
     assert len(messages) == 1
+
+
+def test_topic_returns_a_copy_and_can_be_cleared():
+    topic = EventTopic("anomaly-events")
+    topic.publish({"type": "ANOMALY"})
+
+    messages = topic.get_messages()
+    messages.clear()
+
+    assert len(topic.get_messages()) == 1
+    topic.clear()
+    assert topic.get_messages() == []
